@@ -276,25 +276,31 @@ func NewWorker(conf *WorkerConfig) *Worker {
 
 			heartbeat := time.NewTicker(conf.HeartbeatInterval)
 			heartbeat_done := make(chan struct{})
-			defer close(heartbeat_done)
-			go func() {
+			heartbeat_stopped := make(chan struct{})
+			stopHeartbeat := sync.OnceFunc(func() {
+				close(heartbeat_done)
+				heartbeat.Stop()
+				<-heartbeat_stopped
+			})
+			defer stopHeartbeat()
+			go func(jobId string) {
+				defer close(heartbeat_stopped)
 				for {
 					select {
 					case <-heartbeat.C:
-						if jobId == "" {
-							return
-						}
 						if err := jobTracker.Set(jobId, "started", "", nil); err != nil {
 							log.Error("failed to set job status heartbeat", "error", err, "jobId", jobId)
 						}
 					case <-heartbeat_done:
-						heartbeat.Stop()
 						return
 					}
 				}
-			}()
+			}(jobId)
 
-			if err = conf.Executor(worker); err != nil {
+			err = conf.Executor(worker)
+			// A blocked heartbeat must finish before a terminal status is saved.
+			stopHeartbeat()
+			if err != nil {
 				return err
 			}
 
